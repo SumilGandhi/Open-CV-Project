@@ -105,3 +105,5 @@ while True:
     cv2.imshow("Virtual Painter", img)
     if cv2.waitKey(1) == ord('q'):
         break
+
+#rwah
