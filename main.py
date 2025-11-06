@@ -1,20 +1,15 @@
 import cv2
 import numpy as np
-import os
-import time
 from HandTrackingModule import HandDetector
-from skimage.metrics import structural_similarity as ssim  # pip install scikit-image
 
 
 WINDOW_W, WINDOW_H = 1280, 720
 HEADER_H = 125
-REF_IMG_H = 300
 
 
-# Color and header images
+# Color options
 color_options = [
     {"name": "Purple", "bgr": (255, 0, 255)},
-    {"name": "Blue",   "bgr": (255, 0, 0)},
     {"name": "Green",  "bgr": (0, 255, 0)},
     {"name": "Red",    "bgr": (0, 0, 255)},
     {"name": "Yellow", "bgr": (0, 255, 255)},
@@ -26,81 +21,52 @@ brushThickness = 15
 eraserThickness = 50
 
 
-folderPath = "header"
-overlayList = []
-header_files = ["purple.png", "blue.png", "green.png", "red.png", "yellow.png", "eraser.png"]
-for fname in header_files:
-    img_path = os.path.join(folderPath, fname)
-    if os.path.exists(img_path):
-        loaded_img = cv2.imread(img_path)
-        resized_img = cv2.resize(loaded_img, (WINDOW_W, HEADER_H))
-        overlayList.append(resized_img)
-    else:
-        overlayList.append(np.zeros((HEADER_H, WINDOW_W, 3), np.uint8))
+def create_color_header(selected_idx=0):
+    """Create header with color swatches programmatically"""
+    header = np.ones((HEADER_H, WINDOW_W, 3), np.uint8) * 50  # Dark gray background
+    
+    num_colors = len(color_options)
+    region_width = WINDOW_W // num_colors
+    
+    for i, option in enumerate(color_options):
+        left = i * region_width
+        right = (i + 1) * region_width
+        
+        # Draw color rectangle
+        color = option["bgr"]
+        if option["name"] == "Eraser":
+            # Draw eraser as light gray with diagonal lines
+            cv2.rectangle(header, (left + 10, 10), (right - 10, HEADER_H - 10), (200, 200, 200), -1)
+            cv2.line(header, (left + 10, 10), (right - 10, HEADER_H - 10), (100, 100, 100), 3)
+            cv2.line(header, (right - 10, 10), (left + 10, HEADER_H - 10), (100, 100, 100), 3)
+        else:
+            cv2.rectangle(header, (left + 10, 10), (right - 10, HEADER_H - 10), color, -1)
+        
+        # Add text label
+        text_color = (255, 255, 255) if option["name"] != "Eraser" else (0, 0, 0)
+        cv2.putText(header, option["name"], (left + 30, HEADER_H - 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+        
+        # Highlight selected color with a white border
+        if i == selected_idx:
+            cv2.rectangle(header, (left + 5, 5), (right - 5, HEADER_H - 5), (255, 255, 255), 5)
+    
+    return header
 
 
-header = overlayList[0] if overlayList else np.zeros((HEADER_H, WINDOW_W, 3), np.uint8)
 
-
-# Reference images
-ref_folder = "reference_folder"
-ref_img_files = sorted([f for f in os.listdir(ref_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-reference_images = []
-for f in ref_img_files:
-    full_path = os.path.join(ref_folder, f)
-    img = cv2.imread(full_path, cv2.IMREAD_UNCHANGED)
-    if img is not None:
-        scale = REF_IMG_H / img.shape[0]
-        w_new = int(img.shape[1] * scale)
-        img = cv2.resize(img, (w_new, REF_IMG_H))
-        reference_images.append(img)
-ref_img_idx = 0
-
-
-def overlay_reference(frame, ref_img):
-    if ref_img is None:
-        return frame, {'x':0,'y':0,'w':0,'h':0}
-    h_frame, w_frame = frame.shape[:2]
-    h_ref, w_ref = ref_img.shape[:2]
-    x_offset = w_frame - w_ref - 20
-    y_offset = (h_frame // 2) - (h_ref // 2)
-    if ref_img.shape[2] == 3:
-        frame[y_offset:y_offset+h_ref, x_offset:x_offset+w_ref] = ref_img
-    else:
-        rgb = ref_img[..., :3]
-        alpha = ref_img[..., 3:] / 255.0
-        alpha = np.repeat(alpha, 3, axis=2)
-        roi = frame[y_offset:y_offset+h_ref, x_offset:x_offset+w_ref]
-        roi[:] = (roi * (1 - alpha) + rgb * alpha).astype(np.uint8)
-    ref_area = {'x': x_offset, 'y': y_offset, 'w': w_ref, 'h': h_ref}
-    return frame, ref_area
-
-
-def check_similarity(imgCanvas, ref_img, ref_area):
-    if ref_img is None or ref_area['w'] == 0 or ref_area['h'] == 0:
-        return False
-    x, y, w, h = ref_area['x'], ref_area['y'], ref_area['w'], ref_area['h']
-    drawn_crop = imgCanvas[y:y+h, x:x+w]
-    if drawn_crop.shape[0] == 0 or drawn_crop.shape[1] == 0:
-        return False
-    ref_gray = cv2.cvtColor(ref_img[..., :3], cv2.COLOR_BGR2GRAY)
-    drawn_gray = cv2.cvtColor(drawn_crop, cv2.COLOR_BGR2GRAY)
-    if drawn_gray.shape != ref_gray.shape:
-        drawn_gray = cv2.resize(drawn_gray, ref_gray.shape[::-1])
-    score = ssim(ref_gray, drawn_gray)
-    return score > 0.4  # Adjust threshold as per similarity needs
-
-
+# Initialize camera and detector
 cap = cv2.VideoCapture(0)
 cap.set(3, WINDOW_W)
 cap.set(4, WINDOW_H)
 detector = HandDetector(detectionCon=0.85)
 
-
+# Initialize drawing variables
 xp, yp = 0, 0
-drawColor = color_options[0]["bgr"]
+current_color_idx = 0
+drawColor = color_options[current_color_idx]["bgr"]
 imgCanvas = np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8)
-
+header = create_color_header(current_color_idx)
 
 while True:
     success, img = cap.read()
@@ -108,30 +74,32 @@ while True:
     img = detector.findHands(img)
     lmList = detector.findPosition(img)
 
-
-    current_reference_img = reference_images[ref_img_idx] if reference_images else None
-    img, ref_area = overlay_reference(img, current_reference_img)
-
-
-    # Show tick or cross based on similarity
-    is_similar = check_similarity(imgCanvas, current_reference_img, ref_area)
-    feedback_pos = (ref_area['x'] + ref_area['w']//2 - 40, ref_area['y'] + 40)
-    if is_similar:
-        cv2.putText(img, "O", feedback_pos, cv2.FONT_HERSHEY_SIMPLEX, 2, (0,255,0), 6)
-    else:
-        cv2.putText(img, "X", feedback_pos, cv2.FONT_HERSHEY_SIMPLEX, 2, (0,0,255), 6)
-
-
     if lmList:
         x1, y1 = lmList[8][1:]
         x2, y2 = lmList[12][1:]
+        
+        # Check which fingers are up
         fingers = []
-        for tip in [8, 12, 16, 20]:
-            fingers.append(1 if lmList[tip][2] < lmList[tip - 2][2] else 0)
-        if all(fingers):
+        tip_ids = [4, 8, 12, 16, 20]
+        # Thumb
+        if lmList[tip_ids[0]][1] > lmList[tip_ids[0] - 1][1]:
+            fingers.append(1)
+        else:
+            fingers.append(0)
+        # 4 Fingers
+        for id in range(1, 5):
+            if lmList[tip_ids[id]][2] < lmList[tip_ids[id] - 2][2]:
+                fingers.append(1)
+            else:
+                fingers.append(0)
+        
+        # Clear canvas if all 5 fingers are up
+        if sum(fingers) == 5:
             imgCanvas = np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8)
             xp, yp = 0, 0
-        if fingers[1] and fingers[2]:
+        
+        # Selection Mode: Index and Middle fingers are up
+        if fingers[1] and fingers[2] and not fingers[3]:
             xp, yp = 0, 0
             cv2.rectangle(img, (x1, y1-25), (x2, y2+25), drawColor, cv2.FILLED)
             if y1 < HEADER_H:
@@ -140,19 +108,13 @@ while True:
                     left = i * region_width
                     right = left + region_width
                     if left < x1 < right:
+                        current_color_idx = i
                         drawColor = option["bgr"]
-                        header = overlayList[i]
+                        header = create_color_header(current_color_idx)
                         break
-            if (
-                ref_area['x'] < x1 < ref_area['x'] + ref_area['w'] and
-                ref_area['y'] < y1 < ref_area['y'] + ref_area['h']
-            ):
-                if x1 < ref_area['x'] + ref_area['w'] // 2:
-                    ref_img_idx = (ref_img_idx - 1) % len(reference_images)
-                else:
-                    ref_img_idx = (ref_img_idx + 1) % len(reference_images)
-                time.sleep(0.3)
-        if fingers[1] and not fingers[2]:
+        
+        # Drawing Mode: Only Index finger is up
+        elif fingers[1] and not fingers[2]:
             cv2.circle(img, (x1, y1), 15, drawColor, cv2.FILLED)
             if xp == 0 and yp == 0:
                 xp, yp = x1, y1
@@ -161,7 +123,7 @@ while True:
             cv2.line(imgCanvas, (xp, yp), (x1, y1), drawColor, thickness)
             xp, yp = x1, y1
 
-
+    # Combine canvas with webcam feed
     imgGray = cv2.cvtColor(imgCanvas, cv2.COLOR_BGR2GRAY)
     _, imgInv = cv2.threshold(imgGray, 20, 255, cv2.THRESH_BINARY_INV)
     imgInv = cv2.cvtColor(imgInv, cv2.COLOR_GRAY2BGR)
@@ -169,11 +131,9 @@ while True:
     img = cv2.bitwise_or(img, imgCanvas)
     img[0:HEADER_H, 0:WINDOW_W] = header
 
-
     cv2.imshow("Virtual Painter", img)
     if cv2.waitKey(1) == ord('q'):
         break
-
 
 cap.release()
 cv2.destroyAllWindows()
