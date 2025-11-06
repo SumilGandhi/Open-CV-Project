@@ -2,76 +2,74 @@
 import streamlit as st
 import cv2
 import numpy as np
-import os
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 from HandTrackingModule import HandDetector
 
+WINDOW_W, WINDOW_H = 1280, 720
+HEADER_H = 125
+
+# Color options
+color_options = [
+    {"name": "Purple", "bgr": (255, 0, 255)},
+    {"name": "Green",  "bgr": (0, 255, 0)},
+    {"name": "Red",    "bgr": (0, 0, 255)},
+    {"name": "Yellow", "bgr": (0, 255, 255)},
+    {"name": "Eraser", "bgr": (0, 0, 0)},
+]
+
+def create_color_header(selected_idx=0):
+    """Create header with color swatches programmatically"""
+    header = np.ones((HEADER_H, WINDOW_W, 3), np.uint8) * 50  # Dark gray background
+    
+    num_colors = len(color_options)
+    region_width = WINDOW_W // num_colors
+    
+    for i, option in enumerate(color_options):
+        left = i * region_width
+        right = (i + 1) * region_width
+        
+        # Draw color rectangle
+        color = option["bgr"]
+        if option["name"] == "Eraser":
+            # Draw eraser as light gray with diagonal lines
+            cv2.rectangle(header, (left + 10, 10), (right - 10, HEADER_H - 10), (200, 200, 200), -1)
+            cv2.line(header, (left + 10, 10), (right - 10, HEADER_H - 10), (100, 100, 100), 3)
+            cv2.line(header, (right - 10, 10), (left + 10, HEADER_H - 10), (100, 100, 100), 3)
+        else:
+            cv2.rectangle(header, (left + 10, 10), (right - 10, HEADER_H - 10), color, -1)
+        
+        # Add text label
+        text_color = (255, 255, 255) if option["name"] != "Eraser" else (0, 0, 0)
+        cv2.putText(header, option["name"], (left + 30, HEADER_H - 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+        
+        # Highlight selected color with a white border
+        if i == selected_idx:
+            cv2.rectangle(header, (left + 5, 5), (right - 5, HEADER_H - 5), (255, 255, 255), 5)
+    
+    return header
+
 class VirtualPainterTransformer(VideoTransformerBase):
     def __init__(self):
         self.detector = HandDetector(detectionCon=0.85)
-        self.drawColor = (255, 0, 255)  # Purple
         self.brushThickness = 15
         self.eraserThickness = 50
         self.xp, self.yp = 0, 0
         
         # Initialize canvas
-        self.imgCanvas = np.zeros((720, 1280, 3), np.uint8)
+        self.imgCanvas = np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8)
         
-        # Load header images
-        self.load_header_images()
-        
-        # Initialize session state for color selection
-        if 'selected_color' not in st.session_state:
-            st.session_state.selected_color = (255, 0, 255)  # Purple default
-        if 'brush_size' not in st.session_state:
-            st.session_state.brush_size = 15
-        if 'eraser_size' not in st.session_state:
-            st.session_state.eraser_size = 50
-
-    def load_header_images(self):
-        folderPath = "header"
-        self.overlayList = []
-        if os.path.exists(folderPath):
-            for img in os.listdir(folderPath):
-                if img.endswith(('.png', '.jpg', '.jpeg')):
-                    loaded_img = cv2.imread(f'{folderPath}/{img}')
-                    if loaded_img is not None:
-                        resized_img = cv2.resize(loaded_img, (1280, 125))
-                        self.overlayList.append(resized_img)
-        
-        self.header = self.overlayList[0] if self.overlayList else np.zeros((125, 1280, 3), np.uint8)
-
-    def _get_fingers_up(self, lmList):
-        """Helper function to determine which fingers are up."""
-        fingers = []
-        if not lmList:
-            return fingers
-
-        # Landmark IDs for the tips of the fingers
-        tip_ids = [4, 8, 12, 16, 20]
-
-        # Thumb: Check if the thumb tip is to the left (for a right hand) of the joint below it.
-        # This logic assumes a horizontally flipped image of a right hand.
-        if lmList[tip_ids[0]][1] < lmList[tip_ids[0] - 1][1]:
-            fingers.append(1)
-        else:
-            fingers.append(0)
-
-        # Other 4 fingers: Check if the tip is above the joint below it.
-        for id in range(1, 5):
-            if lmList[tip_ids[id]][2] < lmList[tip_ids[id] - 2][2]:
-                fingers.append(1)
-            else:
-                fingers.append(0)
-        
-        return fingers
+        # Initialize color selection
+        self.current_color_idx = 0
+        self.drawColor = color_options[self.current_color_idx]["bgr"]
+        self.header = create_color_header(self.current_color_idx)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
         # Resize frame to match canvas
-        img = cv2.resize(img, (1280, 720))
+        img = cv2.resize(img, (WINDOW_W, WINDOW_H))
         img = cv2.flip(img, 1)
         
         # Hand detection
@@ -79,36 +77,47 @@ class VirtualPainterTransformer(VideoTransformerBase):
         lmList = self.detector.findPosition(img)
 
         if lmList:
-            fingers = self._get_fingers_up(lmList)
-            
             x1, y1 = lmList[8][1:]  # Index finger tip
-            x2, y2 = lmList[12][1:] # Middle finger tip
-
-            # Selection Mode: Index and Middle fingers are up, Ring finger is down.
+            x2, y2 = lmList[12][1:]  # Middle finger tip
+            
+            # Check which fingers are up
+            fingers = []
+            tip_ids = [4, 8, 12, 16, 20]
+            # Thumb
+            if lmList[tip_ids[0]][1] > lmList[tip_ids[0] - 1][1]:
+                fingers.append(1)
+            else:
+                fingers.append(0)
+            # 4 Fingers
+            for id in range(1, 5):
+                if lmList[tip_ids[id]][2] < lmList[tip_ids[id] - 2][2]:
+                    fingers.append(1)
+                else:
+                    fingers.append(0)
+            
+            # Clear canvas if all 5 fingers are up
+            if sum(fingers) == 5:
+                self.imgCanvas = np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8)
+                self.xp, self.yp = 0, 0
+            
+            # Selection Mode: Index and Middle fingers are up, Ring finger is down
             if fingers[1] and fingers[2] and not fingers[3]:
                 self.xp, self.yp = 0, 0
+                cv2.rectangle(img, (x1, y1 - 25), (x2, y2 + 25), self.drawColor, cv2.FILLED)
                 
                 # If in the header area, select color
-                if y1 < 125:
-                    if 200 < x1 < 350:  # Purple
-                        self.drawColor = (255, 0, 255)
-                        self.header = self.overlayList[0] if len(self.overlayList) > 0 else self.header
-                    elif 400 < x1 < 550:  # Blue
-                        self.drawColor = (255, 0, 0)
-                        self.header = self.overlayList[1] if len(self.overlayList) > 1 else self.header
-                    elif 600 < x1 < 750:  # Green
-                        self.drawColor = (0, 255, 0)
-                        self.header = self.overlayList[2] if len(self.overlayList) > 2 else self.header
-                    elif 800 < x1 < 950:  # Red
-                        self.drawColor = (0, 0, 255)
-                        self.header = self.overlayList[3] if len(self.overlayList) > 3 else self.header
-                    elif 1000 < x1 < 1150:  # Eraser
-                        self.drawColor = (0, 0, 0)
-                        self.header = self.overlayList[4] if len(self.overlayList) > 4 else self.header
+                if y1 < HEADER_H:
+                    region_width = WINDOW_W // len(color_options)
+                    for i, option in enumerate(color_options):
+                        left = i * region_width
+                        right = left + region_width
+                        if left < x1 < right:
+                            self.current_color_idx = i
+                            self.drawColor = option["bgr"]
+                            self.header = create_color_header(self.current_color_idx)
+                            break
 
-                cv2.rectangle(img, (x1, y1 - 25), (x2, y2 + 25), self.drawColor, cv2.FILLED)
-
-            # Drawing Mode: Only Index finger is up.
+            # Drawing Mode: Only Index finger is up
             elif fingers[1] and not fingers[2]:
                 cv2.circle(img, (x1, y1), 15, self.drawColor, cv2.FILLED)
                 if self.xp == 0 and self.yp == 0:
@@ -119,10 +128,6 @@ class VirtualPainterTransformer(VideoTransformerBase):
                 cv2.line(self.imgCanvas, (self.xp, self.yp), (x1, y1), self.drawColor, thickness)
 
                 self.xp, self.yp = x1, y1
-            
-            else:
-                # Reset drawing point if not in a specific mode
-                self.xp, self.yp = 0, 0
 
         # Combine canvas with webcam feed
         imgGray = cv2.cvtColor(self.imgCanvas, cv2.COLOR_BGR2GRAY)
@@ -131,9 +136,8 @@ class VirtualPainterTransformer(VideoTransformerBase):
         img = cv2.bitwise_and(img, imgInv)
         img = cv2.bitwise_or(img, self.imgCanvas)
 
-        # Display header if available
-        if len(self.overlayList) > 0:
-            img[0:125, 0:1280] = self.header
+        # Display header
+        img[0:HEADER_H, 0:WINDOW_W] = self.header
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -145,14 +149,14 @@ def main():
     )
 
     st.title("🎨 Virtual Painter - Hand Tracking")
-    st.markdown("Draw in the air using your index finger! Raise two fingers to enter selection mode.")
+    st.markdown("Draw in the air using your index finger! Use two fingers (index + middle) to select colors from the header.")
 
     # Sidebar controls
     with st.sidebar:
         st.header("🎛️ Controls")
         
-        # This part is now for display purposes, as gestures control the color
-        st.info("Use hand gestures in the video feed to select colors.")
+        # Color info
+        st.info("**Available Colors:**\n- Purple\n- Green\n- Red\n- Yellow\n- Eraser")
 
         # Brush size
         st.subheader("Brush Settings")
@@ -163,7 +167,8 @@ def main():
         st.subheader("📋 Instructions")
         st.markdown("""
         **Hand Gestures:**
-        - ✌️ **Index + Middle**: Selection mode (move into the header to select a color)
+        - ✋ **All 5 fingers up**: Clear canvas
+        - ✌️ **Index + Middle (ring down)**: Selection mode - move to header area to select color
         - 👆 **Index only**: Draw/Paint
         
         **Tips:**
@@ -189,6 +194,7 @@ def main():
             async_processing=True,
         )
     
+    # Update transformer with UI values
     if webrtc_ctx.video_transformer:
         webrtc_ctx.video_transformer.brushThickness = brush_size
         webrtc_ctx.video_transformer.eraserThickness = eraser_size
@@ -203,7 +209,7 @@ def main():
             st.info("Click 'START' to begin")
 
         # Stats
-        st.subheader("⚙️ Settings Summary")
+        st.subheader("⚙️ Settings")
         st.write(f"**Brush Size:** {brush_size}px")
         st.write(f"**Eraser Size:** {eraser_size}px")
 
